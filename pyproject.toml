@@ -1,0 +1,29 @@
+[project]
+authors = [{name = "scw97", email = "samcwhitehead@gmail.com"}]
+dependencies = []
+name = "bee-mic"
+requires-python = ">= 3.11"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["win-64"]
+
+[tool.pixi.pypi-dependencies]
+bee_mic = { path = ".", editable = true }
+
+[tool.pixi.tasks]
+nb = "jupyter notebook"
+
+[tool.pixi.dependencies]
+numpy = ">=2.5.3,<3"
+scipy = ">=1.18.1,<2"
+matplotlib = ">=3.11.2,<4"
+pandas = ">=3.0.6,<4"
+librosa = ">=1.0.0,<2"
+jupyter = ">=1.1.1,<2"
+ipykernel = ">=7.4.0,<8"
