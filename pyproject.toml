@@ -18,6 +18,14 @@ bee_mic = { path = ".", editable = true }
 
 [tool.pixi.tasks]
 nb = "jupyter notebook"
+test = "pytest tests/"
+demo-standard = "python scripts/demo_simulations.py standard"
+demo-flyover = "python scripts/demo_simulations.py flyover"
+demo-multiple-stationary = "python scripts/demo_simulations.py multiple_stationary"
+demo-multiple-moving = "python scripts/demo_simulations.py multiple_moving"
+demo-heatmap = "python scripts/demo_simulations.py heatmap"
+calibrate = "python scripts/run_calibration.py --rough data/rough_array.json --audio data/raw/calibration/ --out data/calibrated_array.json"
+# analyze = "python scripts/analyze_real_data.py"
 
 [tool.pixi.dependencies]
 numpy = ">=2.5.3,<3"
