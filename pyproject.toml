@@ -17,7 +17,7 @@ platforms = ["win-64", "linux-64"]
 bee_mic = { path = ".", editable = true }
 
 [tool.pixi.tasks]
-nb = "jupyter notebook"
+# nb = "jupyter notebook"
 test = "pytest tests/"
 demo-standard = "python scripts/demo_simulations.py standard"
 demo-flyover = "python scripts/demo_simulations.py flyover"
@@ -35,5 +35,16 @@ scipy = ">=1.18.1,<2"
 matplotlib = ">=3.11.2,<4"
 pandas = ">=3.0.6,<4"
 librosa = ">=1.0.0,<2"
-jupyter = ">=1.1.1,<2"
+
+[tool.pixi.environments]
+notebooks = { features = ["notebooks"], solve-group = "default" }
+
+[tool.pixi.feature.notebooks.dependencies]
+jupyterlab = "*"
+ipympl = "*"
+ipywidgets = "*"
 ipykernel = ">=7.4.0,<8"
+
+[tool.pixi.feature.notebooks.tasks]
+nb = "jupyter lab"
+explore = "jupyter lab notebooks/01_explore_bee_mic.ipynb"
