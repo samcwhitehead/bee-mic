@@ -136,6 +136,43 @@ class AcousticSolver:
 
         return tdoas
 
+
+    # ------------------------------------------------------------------------------------------------------
+    def _evaluate_grid(self, bounds, step, mic_positions, mic_pairs, gcc_funcs, center_idx, n_fft):
+        """
+        Helper that generates a 3D grid within `bounds` at `step` spacing
+        and accumulates steered GCC-PHAT power across all valid mic pairs.
+        """
+        # make grid
+        x_min, y_min, z_min = bounds[0]
+        x_max, y_max, z_max = bounds[1]
+
+        x = np.arange(x_min, x_max + step, step)
+        y = np.arange(y_min, y_max + step, step)
+        z = np.arange(z_min, z_max + step, step)
+
+        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
+        grid_points = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+
+        # Calculate distances from every grid point to every microphone
+        distances = np.linalg.norm(
+            grid_points[:, np.newaxis, :] - mic_positions[np.newaxis, :, :], axis=2
+        )
+        power_grid = np.zeros(grid_points.shape[0])
+
+        for pair_idx, (i, j) in enumerate(mic_pairs):
+            # Calculate theoretical TDOA for this specific grid point and mic pair
+            tdoa = (distances[:, j] - distances[:, i]) / self.c_sound
+            lag_samples = np.round(tdoa * self.fs).astype(int)
+
+            # Sum the GCC-PHAT correlation energy at that specific lag
+            indices = np.clip(center_idx + lag_samples, 0, n_fft - 1)
+            power_grid += gcc_funcs[pair_idx, indices]
+
+        # Reshape power grid back to 3D matrix (X, Y, Z)
+        return x, y, z, X, Y, Z, power_grid.reshape(X.shape)
+
+
     # ------------------------------------------------------------------------------------------------------
     def srp_phat(self, received_signals, mic_positions, bounds=([-1.0, -1.0, 0.0], [1.0, 1.0, 1.0]),
                  resolution=0.05, bandpass=None, num_targets=2, exclusion_radius=0.4):
@@ -194,34 +231,12 @@ class AcousticSolver:
         gcc_funcs = np.array(gcc_funcs)
         center_idx = n_fft // 2
 
-        # 4. Generate the 3D scanning grid
-        x_min, y_min, z_min = bounds[0]
-        x_max, y_max, z_max = bounds[1]
-
-        x = np.arange(x_min, x_max + resolution, resolution)
-        y = np.arange(y_min, y_max + resolution, resolution)
-        z = np.arange(z_min, z_max + resolution, resolution)
-
-        X, Y, Z = np.meshgrid(x, y, z, indexing='ij')
-        grid_points = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
-
-        # 5. Steer the array (Vectorized distance and lag calculation)
-        # Calculate distances from every grid point to every microphone
-        distances = np.linalg.norm(grid_points[:, np.newaxis, :] - mic_positions[np.newaxis, :, :], axis=2)
-        power_grid = np.zeros(grid_points.shape[0])
-
-        for pair_idx, (i, j) in enumerate(mic_pairs):
-            # Calculate theoretical TDOA for this specific grid point and mic pair
-            tdoa = (distances[:, j] - distances[:, i]) / self.c_sound
-            lag_samples = np.round(tdoa * self.fs).astype(int)
-
-            # Sum the GCC-PHAT correlation energy at that specific lag
-            indices = np.clip(center_idx + lag_samples, 0, n_fft - 1)
-            power_grid += gcc_funcs[pair_idx, indices]
+        # 4. and 5. Generate the 3D scanning grid and steer the array
+        x, y, z, X, Y, Z, power_3d = self._evaluate_grid(
+            bounds, resolution, mic_positions, mic_pairs, gcc_funcs, center_idx, n_fft
+        )
 
         # 6. Extract targets using Local Maxima and Dynamic Thresholding
-        # Reshape power grid back to 3D matrix (X, Y, Z)
-        power_3d = power_grid.reshape(X.shape)
 
         # A. Find true local peaks (must be the highest point in a surrounding 3D box)
         # size=9 on a 5cm grid means it checks a 45cm neighborhood
@@ -250,6 +265,105 @@ class AcousticSolver:
             print(f"Warning: Only found {len(estimated_positions)} distinct targets above the noise threshold.")
 
         return np.array(estimated_positions), (X, Y, Z, power_3d)
+
+
+    # ------------------------------------------------------------------------------------------------------
+    def srp_phat_hierarchical(self, received_signals, mic_positions, bounds=([-1.0, -1.0, 0.0], [1.0, 1.0, 1.0]),
+                            resolution=0.05, coarse_resolution=0.20, bandpass=None, num_targets=2,
+                            exclusion_radius=0.4):
+        """
+        Hierarchical 2-stage SRP-PHAT solver:
+          Stage 1 (Coarse): Scans the full volume at `coarse_resolution` to find candidate peaks.
+          Stage 2 (Fine):   Refines each candidate peak within a local bounding box at `resolution`.
+        """
+        import itertools
+
+        # 1. Bandpass filter
+        if bandpass is not None:
+            sos = signal.butter(4, bandpass, btype='bandpass', fs=self.fs, output='sos')
+            proc_signals = signal.sosfiltfilt(sos, received_signals, axis=1)
+        else:
+            proc_signals = received_signals
+
+        num_mics = proc_signals.shape[0]
+        n_samples = proc_signals.shape[1]
+        n_fft = 1 << (2 * n_samples - 1).bit_length()
+
+        # 2. Compute FFTs once for all microphones
+        ffts = [np.fft.rfft(proc_signals[i], n=n_fft) for i in range(num_mics)]
+
+        # 3. Dynamic sensor exclusion for flyover singularities
+        rms_levels = np.sqrt(np.mean(proc_signals ** 2, axis=1))
+        median_rms = np.median(rms_levels)
+        valid_mics = [i for i in range(num_mics) if rms_levels[i] <= 4.0 * median_rms]
+        mic_pairs = list(itertools.combinations(valid_mics, 2))
+
+        # 4. Precompute GCC-PHAT lookup tables once
+        gcc_funcs = []
+        for i, j in mic_pairs:
+            cross_spec = ffts[j] * np.conj(ffts[i])
+            mag = np.abs(cross_spec)
+            cross_spec = cross_spec / (mag + 0.05 * np.max(mag))
+            corr = np.fft.fftshift(np.fft.irfft(cross_spec, n=n_fft))
+            gcc_funcs.append(corr)
+
+        gcc_funcs = np.array(gcc_funcs)
+        center_idx = n_fft // 2
+
+        # --- STAGE 1: COARSE SEARCH ---
+        effective_coarse = max(coarse_resolution, resolution)
+        cx, cy, cz, cX, cY, cZ, coarse_power = self._evaluate_grid(
+            bounds, effective_coarse, mic_positions, mic_pairs, gcc_funcs, center_idx, n_fft
+        )
+
+        # Scale neighborhood filter size to coarse step (covers ~40-60cm neighborhood)
+        filter_size = max(3, int(round(exclusion_radius / effective_coarse)) | 1)
+        local_max_mask = (coarse_power == ndimage.maximum_filter(coarse_power, size=filter_size))
+        threshold_mask = (coarse_power > 0.40 * np.max(coarse_power))
+
+        valid_peaks_indices = np.argwhere(local_max_mask & threshold_mask)
+        peak_powers = [coarse_power[tuple(idx)] for idx in valid_peaks_indices]
+        sorted_order = np.argsort(peak_powers)[::-1]
+
+        coarse_candidates = []
+        for i in range(min(num_targets, len(sorted_order))):
+            idx = valid_peaks_indices[sorted_order[i]]
+            coarse_candidates.append(np.array([cx[idx[0]], cy[idx[1]], cz[idx[2]]]))
+
+        # If coarse_resolution wasn't coarser than target resolution, skip Stage 2
+        if effective_coarse <= resolution:
+            return np.array(coarse_candidates), (cX, cY, cZ, coarse_power)
+
+        # --- STAGE 2: FINE REFINEMENT ---
+        # Search +/- 1.5 coarse grid cells around each candidate peak, clamped to room bounds
+        half_box = effective_coarse * 1.5
+        b_min = np.array(bounds[0], dtype=float)
+        b_max = np.array(bounds[1], dtype=float)
+
+        refined_targets = []
+        for cand in coarse_candidates:
+            sub_min = np.maximum(b_min, cand - half_box)
+            sub_max = np.minimum(b_max, cand + half_box)
+
+            fx, fy, fz, _, _, _, fine_power = self._evaluate_grid(
+                (sub_min, sub_max), resolution, mic_positions, mic_pairs, gcc_funcs, center_idx, n_fft
+            )
+
+            best_idx = np.unravel_index(np.argmax(fine_power), fine_power.shape)
+            refined_pos = np.array([fx[best_idx[0]], fy[best_idx[1]], fz[best_idx[2]]])
+            refined_power = fine_power[best_idx]
+            refined_targets.append((refined_power, refined_pos))
+
+        # Re-sort by refined peak power (a narrow sharp peak can overtake a broad coarse peak)
+        refined_targets.sort(key=lambda item: item[0], reverse=True)
+        estimated_positions = [pos for _, pos in refined_targets]
+
+        if len(estimated_positions) < num_targets:
+            print(f"Warning: Only found {len(estimated_positions)} distinct targets above the noise threshold.")
+
+        # Returns the coarse 3D grid as the diagnostic payload so callers unpacking (X, Y, Z, power_3d) still work
+        return np.array(estimated_positions), (cX, cY, cZ, coarse_power)
+
 
     # ------------------------------------------------------------------------------------------------------
     def cancel_interferer(self, received_signals, mic_positions, interferer_pos):

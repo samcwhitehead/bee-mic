@@ -10,31 +10,6 @@ from scipy.spatial.distance import cdist
 
 
 # ---------------------------------------------------------------
-def _normalize_trajectories(data):
-    """
-    Normalizes input into a list of 2D arrays of shape (T, 3).
-    Handles:
-      - A single trajectory: shape (T, 3) or list of [x, y, z]
-      - Multiple trajectories: list of (T, 3) arrays or 3D array (num_bees, T, 3)
-    """
-    if data is None or len(data) == 0:
-        return []
-
-    arr = np.asarray(data, dtype=object)
-    # Single trajectory passed as (T, 3) numeric array or list of 3-element points
-    if arr.ndim == 2 and arr.shape[1] == 3 and np.issubdtype(arr.dtype, np.number):
-        return [arr.astype(float)]
-
-    # Multiple trajectories (or ragged list of trajectories)
-    trajectories = []
-    for item in data:
-        traj = np.asarray(item, dtype=float)
-        if traj.ndim == 2 and traj.shape[1] == 3 and len(traj) > 0:
-            trajectories.append(traj)
-    return trajectories
-
-
-# ---------------------------------------------------------------
 def plot_3d_geometry(mic_positions,
                      true_pos,
                      est_pos,
@@ -90,12 +65,14 @@ def plot_3d_geometry(mic_positions,
     ax.set_zlabel('Z (meters)')
     ax.set_title(title)
     ax.legend()
+    ax.set_aspect('equal')
     plt.tight_layout()
     plt.show()
 
 
+
 # ------------------------------------------------------------------------------------------
-def plot_cross_correlation(tracker, received_signals, ref_mic_idx=0,
+def plot_cross_correlation(received_signals, fs, ref_mic_idx=0,
                            target_mic_idx=1, bandpass=None, use_gcc_phat=True):
     """
     Visualizes the cross-correlation function between two microphones.
@@ -103,7 +80,7 @@ def plot_cross_correlation(tracker, received_signals, ref_mic_idx=0,
     """
     # Apply bandpass if requested
     if bandpass is not None:
-        sos = signal.butter(4, bandpass, btype='bandpass', fs=tracker.fs, output='sos')
+        sos = signal.butter(4, bandpass, btype='bandpass', fs=fs, output='sos')
         proc_signals = signal.sosfiltfilt(sos, received_signals, axis=1)
     else:
         proc_signals = received_signals
@@ -119,26 +96,36 @@ def plot_cross_correlation(tracker, received_signals, ref_mic_idx=0,
 
     cross_spec = TAR_FFT * np.conj(REF_FFT)
 
+    # Apply Generalized Cross-Correlation with Phase Transform (GCC-PHAT)
     if use_gcc_phat:
         mag = np.abs(cross_spec)
+        # Add a small regularization term (epsilon) to avoid division by zero on silent frames
         cross_spec = cross_spec / (mag + 0.05 * np.max(mag))
 
     corr = np.fft.fftshift(np.fft.irfft(cross_spec, n=n_fft))
-    lags = np.arange(-n_fft // 2, n_fft // 2) / tracker.fs * 1000  # in milliseconds
+    lags = np.arange(-n_fft // 2, n_fft // 2) / fs * 1000  # in milliseconds
 
     # Zoom in on the central +/- 10 ms
     mask = (lags >= -10) & (lags <= 10)
 
-    plt.figure(figsize=(10, 4))
+    fig = plt.figure(figsize=(10, 4))
     plt.plot(lags[mask], corr[mask], color='blue')
+
+    # Highlight the peak
+    peak_idx = np.argmax(corr[mask])
+    peak_lag = lags[mask][peak_idx]
+    plt.axvline(peak_lag, color='red', linestyle='--', alpha=0.7, label=f'Peak: {peak_lag:.2f} ms')
+
     plt.title(f"Cross-Correlation (Mic {ref_mic_idx} vs Mic {target_mic_idx}) | GCC-PHAT: {use_gcc_phat}")
     plt.xlabel("Time Lag (ms)")
     plt.ylabel("Correlation Amplitude")
-    plt.grid(True)
+    plt.grid(True, alpha=0.4)
+    plt.legend()
     plt.tight_layout()
     plt.show()
 
 
+# -----------------------------------------------------------------------------------------------
 def plot_spatial_error_heatmap(sim, solver, mic_positions, test_signal, z_height=0.55,
                                grid_size=2.0, resolution=15, snr_db=15,
                                bandpass=(150, 1200), jitter_sec=50e-6):
@@ -157,8 +144,8 @@ def plot_spatial_error_heatmap(sim, solver, mic_positions, test_signal, z_height
             pos = np.array([X[i, j], Y[i, j], z_height])
 
             # 1. Generate audio using the simulator
-            rx, _ = sim.simulate_propagation(pos, mic_positions, test_signal,
-                                          snr_db=snr_db, jitter_sec=jitter_sec)
+            rx, _ = sim.simulate_stationary_propagation(pos, mic_positions, test_signal,
+                                                        snr_db=snr_db, jitter_sec=jitter_sec)
 
             # 2. Process audio using the DSP solver
             tdoas = solver.estimate_tdoa(rx, mic_positions=mic_positions,
@@ -187,6 +174,7 @@ def plot_spatial_error_heatmap(sim, solver, mic_positions, test_signal, z_height
     plt.show()
 
 
+# -----------------------------------------------------------------------------------------------
 def plot_srp_phat_slices(grid_data, est_positions, true_positions=None, mic_positions=None):
     """
     Slices the 3D SRP-PHAT acoustic power grid at the Z-height of each estimated target
@@ -253,6 +241,31 @@ def plot_srp_phat_slices(grid_data, est_positions, true_positions=None, mic_posi
     plt.show()
 
 
+# ---------------------------------------------------------------
+def _normalize_trajectories(data):
+    """
+    Normalizes input into a list of 2D arrays of shape (T, 3).
+    Handles:
+      - A single trajectory: shape (T, 3) or list of [x, y, z]
+      - Multiple trajectories: list of (T, 3) arrays or 3D array (num_bees, T, 3)
+    """
+    if data is None or len(data) == 0:
+        return []
+
+    arr = np.asarray(data)  # , dtype=object)
+    # Single trajectory passed as (T, 3) numeric array or list of 3-element points
+    if arr.ndim == 2 and arr.shape[1] == 3 and np.issubdtype(arr.dtype, np.number):
+        return [arr.astype(float)]
+
+    # Multiple trajectories (or ragged list of trajectories)
+    trajectories = []
+    for item in data:
+        traj = np.asarray(item, dtype=float)
+        if traj.ndim == 2 and traj.shape[1] == 3 and len(traj) > 0:
+            trajectories.append(traj)
+    return trajectories
+
+
 # -----------------------------------------------------------------------------------------------
 def plot_flight_path_3d(actual_positions, raw_positions, smoothed_positions, mic_positions=None):
     """
@@ -314,16 +327,13 @@ def plot_flight_path_3d(actual_positions, raw_positions, smoothed_positions, mic
     ax.set_ylabel('Y (meters)')
     ax.set_zlabel('Z (meters)')
     ax.legend(loc='upper left')
-
-    try:
-        ax.set_box_aspect((1, 1, 0.6))
-    except AttributeError:
-        pass
+    ax.set_aspect('equal')
 
     plt.tight_layout()
     plt.show()
 
 
+# -----------------------------------------------------------------------------------------------
 def count_pollinators_visually(received_signals, fs, ref_mic_idx=0, max_freq=800):
     """
     Generates a high-resolution spectrogram of the reference microphone
@@ -364,5 +374,64 @@ def count_pollinators_visually(received_signals, fs, ref_mic_idx=0, max_freq=800
     plt.grid(color='white', alpha=0.2, linestyle='--')
 
     plt.colorbar(label='Power Spectral Density (dB/Hz)')
+    plt.tight_layout()
+    plt.show()
+
+
+# -----------------------------------------------------------------------------------------------
+def plot_gcc_phat_diagnostic(chunk, fs, mic_A=0, mic_B=1):
+    """
+    Computes and plots the GCC-PHAT cross-correlation specifically to diagnose
+    peak degradation (smearing, splitting) caused by Doppler shift or rapid
+    Time-Difference-Of-Arrival (TDOA) changes during the window.
+    """
+    sig_A = chunk[mic_A]
+    sig_B = chunk[mic_B]
+
+    n = len(sig_A)
+    n_fft = 1 << (2 * n - 1).bit_length()
+
+    # Compute FFTs
+    fft_A = np.fft.rfft(sig_A, n=n_fft)
+    fft_B = np.fft.rfft(sig_B, n=n_fft)
+
+    # Cross-power spectrum
+    cross_spec = fft_A * np.conj(fft_B)
+
+    # PHAT weighting (Phase Transform) with small epsilon to prevent div by zero
+    mag = np.abs(cross_spec)
+    cross_spec_phat = cross_spec / (mag + 1e-10)
+
+    # Inverse FFT and shift to center zero-lag
+    gcc = np.fft.fftshift(np.fft.irfft(cross_spec_phat, n=n_fft))
+
+    # Calculate time lags in milliseconds
+    lags = np.arange(-n_fft // 2, n_fft // 2) / fs * 1000
+
+    # Zoom in tightly to +/- 5 ms (for small arrays, true TDOA is usually < 2ms)
+    mask = (lags >= -5) & (lags <= 5)
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(lags[mask], gcc[mask], color='crimson', linewidth=1.5, label='Degraded GCC-PHAT')
+
+    # Highlight the maximum peak found
+    peak_idx = np.argmax(gcc[mask])
+    peak_lag = lags[mask][peak_idx]
+    peak_val = gcc[mask][peak_idx]
+
+    plt.axvline(peak_lag, color='black', linestyle='--', alpha=0.6,
+                label=f'Apparent Peak: {peak_lag:.2f} ms')
+    plt.scatter([peak_lag], [peak_val], color='black', zorder=5)
+
+    plt.title(
+        f"Flyover Singularity Diagnostic (Mic {mic_A} vs Mic {mic_B})\nNotice the widened base or split peaks caused by rapid TDOA shift")
+    plt.xlabel("Time Lag (ms)")
+    plt.ylabel("Correlation Amplitude")
+
+    # Add a zero-line for reference
+    plt.axhline(0, color='gray', linewidth=0.5, alpha=0.5)
+
+    plt.grid(True, alpha=0.3)
+    plt.legend(loc='upper right')
     plt.tight_layout()
     plt.show()

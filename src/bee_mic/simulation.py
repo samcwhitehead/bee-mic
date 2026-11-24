@@ -80,12 +80,12 @@ class SourceSimulator:
     # ==========================================
     # SIGNAL PROPAGATION
     # ==========================================
-    def simulate_propagation(self,
-                             source_pos,
-                             mic_positions,
-                             clean_sig,
-                             snr_db=20,
-                             jitter_sec=0.0):
+    def simulate_stationary_propagation(self,
+                                        source_pos,
+                                        mic_positions,
+                                        clean_sig,
+                                        snr_db=20,
+                                        jitter_sec=0.0):
         """Verified FFT exact phase-shift propagation with optional environmental jitter"""
         received_signals = []
         distances = np.linalg.norm(mic_positions - source_pos, axis=1)

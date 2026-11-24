@@ -24,6 +24,8 @@ demo-flyover = "python scripts/demo_simulations.py flyover"
 demo-multiple-stationary = "python scripts/demo_simulations.py multiple_stationary"
 demo-multiple-moving = "python scripts/demo_simulations.py multiple_moving"
 demo-heatmap = "python scripts/demo_simulations.py heatmap"
+demo-cross-correlation = "python scripts/demo_simulations.py cross_correlation"
+demo-hierarchical = "python scripts/demo_simulations.py hierarchical"
 calibrate = "python scripts/run_calibration.py --rough data/rough_array.json --audio data/raw/calibration/ --out data/calibrated_array.json"
 # analyze = "python scripts/analyze_real_data.py"
 

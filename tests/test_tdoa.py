@@ -25,7 +25,7 @@ def validate_tdoa_physics():
     print(f"Solver-only error (exact TDOAs):  {solver_err * 1e6:.4f} µm  [Target: < 1 µm]")
 
     # Test B: Full pipeline at ultra-high SNR (100 dB = virtually noiseless)
-    rx_clean, _ = sim.simulate_propagation(test_pos, mic_array, test_signal, snr_db=100)
+    rx_clean, _ = sim.simulate_stationary_propagation(test_pos, mic_array, test_signal, snr_db=100)
     est_tdoas = solver.estimate_tdoa(rx_clean, ref_mic_idx=0)
     tdoa_err_us = np.max(np.abs(true_tdoas - est_tdoas)) * 1e6
 
@@ -37,7 +37,7 @@ def validate_tdoa_physics():
     print("\n=== 2. MONTE CARLO NOISE & BIAS CHECK (50 TRIALS @ 20 dB SNR) ===")
     estimates = []
     for _ in range(50):
-        rx_noisy, _ = sim.simulate_propagation(test_pos, mic_array, test_signal, snr_db=20)
+        rx_noisy, _ = sim.simulate_stationary_propagation(test_pos, mic_array, test_signal, snr_db=20)
         tdoas = solver.estimate_tdoa(rx_noisy, ref_mic_idx=0)
         estimates.append(solver.multilateration(mic_array, tdoas))
 
@@ -57,7 +57,7 @@ def validate_tdoa_physics():
         direction /= np.linalg.norm(direction)
         pos = direction * r
 
-        rx, _ = sim.simulate_propagation(pos, mic_array, test_signal, snr_db=100)
+        rx, _ = sim.simulate_stationary_propagation(pos, mic_array, test_signal, snr_db=100)
         tdoas = solver.estimate_tdoa(rx, ref_mic_idx=0)
         est = solver.multilateration(mic_array, tdoas)
 

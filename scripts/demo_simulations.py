@@ -1,5 +1,6 @@
 import argparse
 import numpy as np
+import time
 
 from scipy.spatial.distance import cdist
 from scipy.optimize import linear_sum_assignment
@@ -8,9 +9,12 @@ from bee_mic.simulation import SourceSimulator
 from bee_mic.geometry import ArrayGeometry
 from bee_mic.dsp import AcousticSolver
 from bee_mic.tracking import KinematicKalmanFilter
-from bee_mic.visualization import plot_flight_path_3d, plot_spatial_error_heatmap, plot_3d_geometry  # , plot_gcc_phat_diagnostic
+from bee_mic.util import pad_sum
+from bee_mic.visualization import (plot_flight_path_3d, plot_spatial_error_heatmap, plot_3d_geometry,
+                                   plot_cross_correlation, plot_gcc_phat_diagnostic)
 
 
+# ---------------------------------------------------------------------
 def demo_standard_flight():
     print("=== DYNAMIC TRACKING: STANDARD FLIGHT ===")
     sim = SourceSimulator(fs=48000)
@@ -24,6 +28,11 @@ def demo_standard_flight():
 
     # 2. Simulate moving audio
     rx_moving = sim.simulate_moving_propagation(trajectory, mics, sig, snr_db=20)
+
+    # Calculate an energy threshold based on the whole recording
+    # (or set a fixed threshold empirically)
+    global_rms = np.sqrt(np.mean(rx_moving ** 2))
+    energy_threshold = global_rms * 0.25  # adjust multiplier as needed
 
     # 3. Track with SRP-PHAT and Kalman Filter
     solver = AcousticSolver(fs=48000)
@@ -41,22 +50,32 @@ def demo_standard_flight():
         if int(mid_time_emit * sim.fs) >= len(sig):
             break
 
+        # True position
         true_mid_pos = trajectory[int(mid_time_emit * sim.fs)]
         actual_positions.append(true_mid_pos)
 
-        raw_pos, _ = solver.srp_phat(audio_chunk, mics, bounds=([-1, -1, 0], [1, 1, 1]))
-        raw_positions.append(raw_pos[0])
-
+        # Kalman prediction
         kf.predict()
-        smoothed_pos = kf.update(raw_pos[0])
-        smoothed_positions.append(smoothed_pos)
 
-        print(
-            f"T: {(start_idx / sim.fs) * 1000:4.0f}ms | Raw Err: {np.linalg.norm(true_mid_pos - raw_pos[0]) * 100:5.1f}cm | Smooth Err: {np.linalg.norm(true_mid_pos - smoothed_pos) * 100:5.1f}cm")
+        # Check if audio chunk has sufficient power for analysis
+        frame_rms = np.sqrt(np.mean(audio_chunk ** 2))
+        if frame_rms > energy_threshold:
+            raw_pos, _ = solver.srp_phat(audio_chunk, mics, bounds=([-1, -1, 0], [1, 1, 1]))
+            raw_positions.append(raw_pos[0])
+
+            smoothed_pos = kf.update(raw_pos[0])
+            smoothed_positions.append(smoothed_pos)
+
+            print(
+                f"T: {(start_idx / sim.fs) * 1000:4.0f}ms | Raw Err: {np.linalg.norm(true_mid_pos - raw_pos[0]) * 100:5.1f}cm | Smooth Err: {np.linalg.norm(true_mid_pos - smoothed_pos) * 100:5.1f}cm")
+        else:
+            raw_positions.append(np.full(3, np.nan))
+            smoothed_positions.append(np.full(3, np.nan))
 
     plot_flight_path_3d(actual_positions, raw_positions, smoothed_positions, mic_positions=mics)
 
 
+# ---------------------------------------------------------------------
 def demo_flyover_singularity():
     print("=== DYNAMIC TRACKING: FLYOVER SINGULARITY ===")
     sim = SourceSimulator(fs=48000)
@@ -73,11 +92,12 @@ def demo_flyover_singularity():
     window_samples = int(0.04 * sim.fs)
     bad_chunk = rx_moving[:, mid_idx - window_samples // 2: mid_idx + window_samples // 2]
 
-    # print("Plotting degraded cross-correlation peak for Center Mic (0) vs Perimeter Mic (1)...")
-    # print("Notice the peak is smeared or split due to massive Doppler and delay shifts.")
-    # plot_gcc_phat_diagnostic(bad_chunk, fs=48000, mic_A=0, mic_B=1)
+    print("Plotting degraded cross-correlation peak for Center Mic (0) vs Perimeter Mic (1)...")
+    print("Notice the peak is smeared or split due to massive Doppler and delay shifts.")
+    plot_gcc_phat_diagnostic(bad_chunk, fs=48000, mic_A=0, mic_B=1)
 
 
+# ---------------------------------------------------------------------
 def demo_multiple_stationary():
     print("=== DYNAMIC TRACKING: TWO STATIONARY BEES ===")
     sim = SourceSimulator(fs=48000)
@@ -88,15 +108,15 @@ def demo_multiple_stationary():
     # 1. Bee A: Bumblebee hovering in the Northwest quadrant
     sig_A = sim.generate_pollinator_buzz(duration=duration, f0=230.0)
     pos_A = np.array([-0.5, 0.5, 0.5])
-    rx_A, _ = sim.simulate_propagation(pos_A, mics, sig_A, snr_db=25)
+    rx_A, _ = sim.simulate_stationary_propagation(pos_A, mics, sig_A, snr_db=25)
 
     # 2. Bee B: Honeybee hovering in the Southeast quadrant
     sig_B = sim.generate_pollinator_buzz(duration=duration, f0=240.0)
     pos_B = np.array([0.5, -0.5, 0.5])
-    rx_B, _ = sim.simulate_propagation(pos_B, mics, sig_B, snr_db=25)
+    rx_B, _ = sim.simulate_stationary_propagation(pos_B, mics, sig_B, snr_db=25)
 
     # 3. Superposition
-    rx_combined = rx_A + rx_B
+    rx_combined = pad_sum(rx_A, rx_B)
 
     solver = AcousticSolver(fs=48000)
 
@@ -138,7 +158,7 @@ def demo_multiple_moving():
     traj_B = np.linspace(np.array([0.9, 0.5, 0.6]), np.array([-0.9, 0.5, 0.6]), len(sig_B))
     rx_B = sim.simulate_moving_propagation(traj_B, mics, sig_B, snr_db=25)
 
-    rx_combined = rx_A + rx_B
+    rx_combined = pad_sum(rx_A, rx_B)
     solver = AcousticSolver(fs=48000)
 
     # Initialize TWO independent Kalman filters
@@ -195,6 +215,7 @@ def demo_multiple_moving():
         mic_positions=mics
     )
 
+
 # --------------------------------------------------------------
 def demo_gdop_heatmap():
     """
@@ -220,11 +241,144 @@ def demo_gdop_heatmap():
     )
 
 
+# ------------------------------------------------------------------
+def demo_cross_correlation():
+    print("=== DIAGNOSTIC: CROSS-CORRELATION & GCC-PHAT ===")
+    sim = SourceSimulator(fs=48000)
+
+    # 4-mic square array (Mics are typically at the corners)
+    mics = ArrayGeometry.perimeter_array(width=2.0, length=2.0)
+
+    # Place a bee off-center so the sound reaches Mic 0 and Mic 1 at different times
+    bee_pos = np.array([0.5, 0.8, 0.5])
+    print(f"Bee placed at: {bee_pos}")
+
+    # Generate a short 250 Hz buzz (0.1 seconds is plenty for this)
+    sig = sim.generate_pollinator_buzz(duration=0.1, f0=250.0)
+
+    # Simulate propagation with a realistic SNR
+    rx, _ = sim.simulate_stationary_propagation(bee_pos, mics, sig, snr_db=20)
+
+    # Extract a 40ms window for correlation
+    window_samples = int(0.04 * sim.fs)
+    audio_chunk = rx[:, :window_samples]
+
+    # 1. Standard Cross-Correlation
+    print("\nPlotting standard cross-correlation...")
+    print("Notice the repeating peaks (cycle-skipping) caused by the 250 Hz wingbeat.")
+    plot_cross_correlation(
+        received_signals=audio_chunk,
+        fs=sim.fs,
+        ref_mic_idx=0,
+        target_mic_idx=1,
+        use_gcc_phat=False
+    )
+
+    # 2. GCC-PHAT
+    print("\nPlotting GCC-PHAT...")
+    print("Notice how the phase transform 'whitens' the signal, squashing the harmonics to reveal the true TDOA peak.")
+    plot_cross_correlation(
+        received_signals=audio_chunk,
+        fs=sim.fs,
+        ref_mic_idx=0,
+        target_mic_idx=1,
+        use_gcc_phat=True
+    )
+
+
+# --------------------------------------------------------------------------------
+def demo_hierarchical_benchmark():
+    print("=== BENCHMARK: FLAT SRP-PHAT VS. HIERARCHICAL SRP-PHAT ===")
+    sim = SourceSimulator(fs=48000)
+    mics = ArrayGeometry.perimeter_array(width=2.0, length=2.0)
+
+    # 1. Place two stationary bees at distinct locations (250 Hz and 350 Hz)
+    pos_A = np.array([-0.55, 0.45, 0.42])
+    pos_B = np.array([0.60, -0.40, 0.68])
+    true_positions = np.vstack([pos_A, pos_B])
+
+    duration = 0.25
+    sig_A = sim.generate_pollinator_buzz(duration=duration, f0=250.0)
+    sig_B = sim.generate_pollinator_buzz(duration=duration, f0=350.0)
+
+    rx_A, _ = sim.simulate_stationary_propagation(pos_A, mics, sig_A, snr_db=25)
+    rx_B, _ = sim.simulate_stationary_propagation(pos_B, mics, sig_B, snr_db=25)
+    rx_combined = pad_sum(rx_A, rx_B)
+
+    solver = AcousticSolver(fs=48000)
+    window_samples = int(0.04 * sim.fs)
+    step_samples = int(0.02 * sim.fs)
+
+    # Slice audio into frames up front so slicing overhead isn't measured
+    chunks = [
+        rx_combined[:, i:i + window_samples]
+        for i in range(0, rx_combined.shape[1] - window_samples, step_samples)
+    ]
+
+    target_res = 0.02  # 2 cm grid resolution
+    coarse_res = 0.20  # 20 cm coarse pass
+    bounds = ([-1.0, -1.0, 0.0], [1.0, 1.0, 1.0])
+
+    # Warm-up call (avoids cold-start / FFT cache bias on frame 0)
+    _ = solver.srp_phat(chunks[0], mics, bounds=bounds, resolution=target_res, num_targets=2)
+    _ = solver.srp_phat_hierarchical(
+        chunks[0], mics, bounds=bounds, resolution=target_res,
+        coarse_resolution=coarse_res, num_targets=2
+    )
+
+    # 2. Benchmark Flat SRP-PHAT
+    t0 = time.perf_counter()
+    flat_estimates = []
+    for chunk in chunks:
+        est, _ = solver.srp_phat(
+            chunk, mics, bounds=bounds, resolution=target_res, num_targets=2
+        )
+        flat_estimates.append(est)
+    flat_time = time.perf_counter() - t0
+
+    # 3. Benchmark Hierarchical SRP-PHAT
+    t0 = time.perf_counter()
+    hier_estimates = []
+    for chunk in chunks:
+        est, _ = solver.srp_phat_hierarchical(
+            chunk, mics, bounds=bounds, resolution=target_res,
+            coarse_resolution=coarse_res, num_targets=2
+        )
+        hier_estimates.append(est)
+    hier_time = time.perf_counter() - t0
+
+    # 4. Compute mean localization error (in cm) across all frames
+    def compute_mean_error_cm(estimates_per_frame):
+        errors = []
+        for est_pts in estimates_per_frame:
+            if len(est_pts) == 0:
+                continue
+            # Match each detected peak to its nearest ground-truth bee
+            dist_mat = cdist(np.atleast_2d(est_pts), true_positions)
+            errors.extend(np.min(dist_mat, axis=1) * 100.0)
+        return float(np.mean(errors)) if errors else float('nan')
+
+    flat_err_cm = compute_mean_error_cm(flat_estimates)
+    hier_err_cm = compute_mean_error_cm(hier_estimates)
+    speedup = flat_time / hier_time if hier_time > 0 else float('inf')
+
+    # 5. Print comparison summary
+    print(f"\nProcessed {len(chunks)} windows (40ms window, {target_res*100:.0f}cm target grid):\n")
+    print(f"{'Solver':<26} | {'Total Time':<11} | {'Per Frame':<11} | {'Mean Error':<10}")
+    print("-" * 68)
+    print(f"{'Flat srp_phat':<26} | {flat_time:>8.3f} s  | {(flat_time/len(chunks))*1000:>7.1f} ms | {flat_err_cm:>7.2f} cm")
+    print(f"{'srp_phat_hierarchical':<26} | {hier_time:>8.3f} s  | {(hier_time/len(chunks))*1000:>7.1f} ms | {hier_err_cm:>7.2f} cm")
+    print("-" * 68)
+    print(f"Speedup: {speedup:.1f}x faster")
+
+
+
 # ============================================================================================
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bee-Mic Demonstration Scripts")
     parser.add_argument('scenario',
-                        choices=['standard', 'flyover', 'multiple_stationary', 'multiple_moving', 'heatmap'],
+                        choices=['standard', 'flyover', 'multiple_stationary', 'multiple_moving', 'heatmap',
+                                 'cross_correlation', 'hierarchical'],
                         help="Demonstration to run")
     args = parser.parse_args()
 
@@ -238,3 +392,7 @@ if __name__ == "__main__":
         demo_multiple_moving()
     elif args.scenario == 'heatmap':
         demo_gdop_heatmap()
+    elif args.scenario == 'cross_correlation':
+        demo_cross_correlation()
+    elif args.scenario == 'hierarchical':
+        demo_hierarchical_benchmark()
